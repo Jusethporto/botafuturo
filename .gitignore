@@ -12,3 +12,7 @@ dist/
 
 # Trading journal / runtime output
 journal/
+
+# Raw traffic captures (contain real credentials/session tokens - never commit)
+docs/spike-capture/
+*.mitm
