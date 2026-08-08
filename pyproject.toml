@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "botafuturo"
+version = "0.1.0"
+description = "Trading bot for the Exnova broker (paper-trading-only in v1)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "botafuturo" }]
+dependencies = [
+    "pydantic-settings>=2.4,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4,<9.0",
+    "pytest-asyncio>=0.21,<1.0",
+]
+exnova = [
+    "keyring>=24.0,<26.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: fast, isolated unit tests",
+    "contract: port/contract conformance tests",
+    "integration: tests exercising adapters against fakes or local services",
+    "architecture: tests enforcing hexagonal layering boundaries",
+    "e2e: end-to-end tests against the paper-trading flow",
+]

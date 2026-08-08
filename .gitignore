@@ -1,0 +1,14 @@
+# Secrets / local config
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Trading journal / runtime output
+journal/
