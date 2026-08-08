@@ -39,6 +39,9 @@ _UNSUBSCRIBE = "unsubscribeMessage"
 _AUTH_PROTOCOL_VERSION = 3
 #: Default subscription envelope version (observed value).
 _SUBSCRIPTION_VERSION = "1.0"
+#: Bounded number of non-matching messages `connect()` will skip while
+#: waiting for the `authenticated` confirmation (see `connect()` docstring).
+_MAX_AUTH_SKIP = 20
 
 
 class WsTransport(Protocol):
@@ -108,9 +111,20 @@ class ExnovaWsClient:
     def connect(self, ssid: str) -> None:
         """Open the WS connection and perform the `authenticate` handshake.
 
+        The server does not guarantee `authenticated` is strictly the first
+        message on the wire: a `timeSync` heartbeat (pushed roughly every
+        second, see docs/spike-report.md's Heartbeat section) can arrive
+        before the `authenticated` confirmation. This loop skips any message
+        that isn't the `authenticated` confirmation, up to `_MAX_AUTH_SKIP`
+        non-matching messages, to avoid mistaking a heartbeat (or any other
+        stray push) for a failed handshake while still bailing out instead
+        of skipping forever if `authenticated` genuinely never arrives.
+
         Raises:
-            AuthenticationError: if the server's first response is not a
-                successful `authenticated` confirmation.
+            AuthenticationError: if the server explicitly rejects the
+                handshake (`authenticated` with `msg` not `True`), or if no
+                `authenticated` confirmation arrives within `_MAX_AUTH_SKIP`
+                skipped messages.
         """
         self._transport = self._transport_factory(self._url)
         self._send(
@@ -123,9 +137,21 @@ class ExnovaWsClient:
                 },
             }
         )
-        response = self._recv()
-        if response.get("name") != _AUTHENTICATED or response.get("msg") is not True:
-            raise AuthenticationError(f"WS authentication failed: {response!r}")
+        last_response: Mapping[str, Any] = {}
+        for _ in range(_MAX_AUTH_SKIP):
+            response = self._recv()
+            last_response = response
+            if response.get("name") == _AUTHENTICATED:
+                if response.get("msg") is True:
+                    return
+                raise AuthenticationError(f"WS authentication failed: {response!r}")
+            # Not the authenticated confirmation (e.g. a `timeSync`
+            # heartbeat) -- keep reading, this is not necessarily a failure.
+        raise AuthenticationError(
+            "WS authentication failed: no 'authenticated' confirmation after "
+            f"skipping {_MAX_AUTH_SKIP} non-matching messages; last message "
+            f"seen: {last_response!r}"
+        )
 
     def disconnect(self) -> None:
         """Close the WS connection. Idempotent: safe to call when not

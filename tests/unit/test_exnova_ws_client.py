@@ -10,6 +10,7 @@ from typing import Any, List, Mapping, Optional
 import pytest
 
 from botafuturo.adapters.exnova.ws_client import (
+    _MAX_AUTH_SKIP,
     AuthenticationError,
     ExnovaWsClient,
     WsConnectionLost,
@@ -77,8 +78,46 @@ def test_connect_raises_authentication_error_when_server_rejects() -> None:
         client.connect(_SSID)
 
 
-def test_connect_raises_authentication_error_on_unexpected_first_message() -> None:
-    transport = FakeTransport(incoming=[{"name": "front", "msg": "host"}])
+def test_connect_raises_authentication_error_when_skip_limit_exceeded_by_unexpected_messages() -> None:
+    """A single stray non-`authenticated` message (e.g. `front`) is no
+    longer treated as an immediate handshake failure -- `connect()` skips
+    it and keeps waiting, matching real server behavior where `authenticated`
+    isn't guaranteed to be the literal first message (see
+    docs/spike-report.md's Heartbeat section). Only running out of the
+    bounded skip budget without ever seeing `authenticated` is a failure."""
+    incoming = [{"name": "front", "msg": "host"}] * _MAX_AUTH_SKIP
+    transport = FakeTransport(incoming=incoming)
+    client = ExnovaWsClient(transport_factory=lambda url: transport)
+
+    with pytest.raises(AuthenticationError):
+        client.connect(_SSID)
+
+
+def test_connect_succeeds_when_timesync_heartbeats_arrive_before_authenticated() -> None:
+    """Real server behavior observed against Exnova's live WS (2026-08-08
+    live run): `timeSync` heartbeats can arrive before the `authenticated`
+    confirmation -- the server does not guarantee `authenticated` is
+    strictly the first message on the wire (see docs/spike-report.md's
+    Heartbeat section). `connect()` must skip non-matching messages instead
+    of treating the first `timeSync` push as a failed handshake."""
+    transport = FakeTransport(
+        incoming=[
+            {"name": "timeSync", "msg": 1786216719316},
+            {"name": "timeSync", "msg": 1786216720316},
+            _authenticated_msg(),
+        ]
+    )
+    client = ExnovaWsClient(transport_factory=lambda url: transport)
+
+    client.connect(_SSID)  # must not raise
+
+
+def test_connect_raises_authentication_error_after_skip_limit_exceeded_by_timesync_only() -> None:
+    """If `authenticated` never arrives (only heartbeats keep coming),
+    `connect()` must give up after a bounded number of skipped messages
+    instead of hanging or skipping forever."""
+    incoming = [{"name": "timeSync", "msg": 1786216719316 + i} for i in range(_MAX_AUTH_SKIP + 5)]
+    transport = FakeTransport(incoming=incoming)
     client = ExnovaWsClient(transport_factory=lambda url: transport)
 
     with pytest.raises(AuthenticationError):
