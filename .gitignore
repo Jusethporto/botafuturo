@@ -16,3 +16,6 @@ journal/
 # Raw traffic captures (contain real credentials/session tokens - never commit)
 docs/spike-capture/
 *.mitm
+
+# Claude Code tooling metadata (not project source)
+.atl/
