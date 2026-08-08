@@ -5,9 +5,12 @@ so the loop terminates naturally -- no infinite-loop concerns in tests.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Optional
+
+import pytest
 
 from botafuturo.cli.run import run_session
 from botafuturo.domain.models import Candle, Signal
@@ -137,3 +140,20 @@ def test_run_session_disconnects_even_when_stream_is_empty() -> None:
 
     assert processed == 0
     assert market_data.connected is False
+
+
+def test_run_session_logs_an_info_record_per_processed_candle(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candles = [_candle(0, "101.5")]
+    market_data = FakeMarketData(candles=candles)
+    session, _strategy = _build_session()
+
+    with caplog.at_level(logging.INFO, logger="botafuturo.cli.run"):
+        run_session(session, market_data, _ASSET, _TIMEFRAME_S)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) == 1
+    message = info_records[0].getMessage()
+    assert _ASSET in message
+    assert "101.5" in message

@@ -9,7 +9,10 @@ standing in for a future real Exnova adapter).
 """
 from __future__ import annotations
 
-from datetime import date
+import io
+import logging
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,7 @@ from botafuturo.adapters.logging.journal import JsonlTradeLog
 from botafuturo.adapters.logging.redaction import SecretRegistry
 from botafuturo.cli.wire import build_paper_trading_session, open_journal_for_report
 from botafuturo.config.settings import Settings
+from botafuturo.domain.models import Direction, OrderAck, OrderRequest, Outcome, Trade
 from botafuturo.domain.risk.manager import RiskManager
 from botafuturo.domain.session import TradingSession
 from botafuturo.domain.strategy.ma_crossover import MovingAverageCrossoverStrategy
@@ -108,3 +112,92 @@ def test_open_journal_for_report_reads_back_appended_records(tmp_path: Path) -> 
 
     records = list(reader.read())
     assert [r["order_id"] for r in records] == ["a"]
+
+
+def _trade(outcome: Outcome, pnl: str, balance_after: str) -> Trade:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    request = OrderRequest(
+        asset=_ASSET,
+        direction=Direction.CALL,
+        stake=Decimal("10"),
+        expiry_s=60,
+        opened_at=opened_at,
+        payout_rate=Decimal("0.85"),
+    )
+    ack = OrderAck(
+        order_id="order-1",
+        request=request,
+        expiry_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        entry_price=Decimal("100"),
+    )
+    return Trade(
+        ack=ack,
+        expiry_price=Decimal("101"),
+        outcome=outcome,
+        pnl=Decimal(pnl),
+        balance_after=Decimal(balance_after),
+    )
+
+
+def test_log_trade_logs_an_info_record_with_outcome_and_pnl(
+    settings: Settings, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    market_data = FakeMarketData()
+    wired = build_paper_trading_session(
+        settings, market_data, asset=_ASSET, journal_dir=tmp_path
+    )
+    trade = _trade(Outcome.WIN, "8.5", "1008.5")
+
+    with caplog.at_level(logging.INFO, logger="botafuturo.cli.wire"):
+        wired.session.log_trade(trade)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) == 1
+    message = info_records[0].getMessage()
+    assert "win" in message
+    assert "8.5" in message
+    assert "1008.5" in message
+
+
+def test_log_trade_info_record_passes_through_the_redaction_chokepoint(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """`build_paper_trading_session` installs `RedactingFilter` (via
+    `configure()`) on the root logger/handler BEFORE `log_trade`'s new
+    `logger.info(...)` call ever fires. This proves that new call is not a
+    bypass of the PR5/PR8 redaction chokepoint: an adversarial secret probed
+    through the SAME logger `log_trade` uses is substituted with the
+    redaction marker instead of appearing verbatim -- exactly like every
+    other logger in this codebase (mirrors the pattern in
+    `tests/architecture/test_no_secret_leakage.py`, minus the full session
+    drive).
+    """
+    market_data = FakeMarketData()
+    wired = build_paper_trading_session(
+        settings, market_data, asset=_ASSET, journal_dir=tmp_path
+    )
+    secret = settings.exnova_password.get_secret_value()
+
+    # Attach a plain, non-redacting handler AFTER `configure()` has already
+    # installed the production redacting handler, so this handler observes
+    # each record's message post-filter -- the same ordering the existing
+    # e2e leakage test relies on.
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(handler)
+    try:
+        # Adversarial probe through the exact same logger `log_trade` uses
+        # (`botafuturo.cli.wire`), proving the chokepoint actively
+        # substitutes rather than this new call site being unfiltered.
+        logging.getLogger("botafuturo.cli.wire").info(
+            "probe leaked_password=%s", secret
+        )
+        wired.session.log_trade(_trade(Outcome.LOSS, "-10", "990"))
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    log_text = stream.getvalue()
+    assert secret not in log_text
+    assert "***REDACTED***" in log_text
+    assert "loss" in log_text  # the real log_trade call still went through

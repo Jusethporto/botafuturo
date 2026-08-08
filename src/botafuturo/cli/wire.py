@@ -21,6 +21,7 @@ exactly the swappability the hexagonal/ports-and-adapters design calls for.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -36,6 +37,8 @@ from botafuturo.domain.risk.manager import RiskManager
 from botafuturo.domain.session import TradingSession
 from botafuturo.domain.strategy.ma_crossover import MovingAverageCrossoverStrategy
 from botafuturo.ports.market_data import MarketDataPort
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,13 @@ def build_paper_trading_session(
 
     def log_trade(trade: Trade) -> None:
         trade_log.append(_trade_to_record(trade))
+        logger.info(
+            "trade settled asset=%s outcome=%s pnl=%s balance_after=%s",
+            trade.ack.request.asset,
+            trade.outcome.value,
+            trade.pnl,
+            trade.balance_after,
+        )
 
     session = TradingSession(
         asset=asset,

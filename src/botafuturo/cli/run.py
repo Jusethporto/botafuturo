@@ -53,6 +53,12 @@ def run_session(
                 session.strategy.reset()
                 continue
             session.on_candle(item)
+            logger.info(
+                "candle asset=%s close=%s open_time=%s",
+                asset,
+                item.close,
+                item.open_time,
+            )
             processed += 1
     finally:
         market_data.disconnect()
