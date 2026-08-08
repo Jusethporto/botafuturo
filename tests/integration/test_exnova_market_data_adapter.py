@@ -189,7 +189,14 @@ def test_stream_closed_candles_subscribes_for_the_configured_active_id() -> None
     subscribe_frames = [f for f in transport.sent if f["name"] == "subscribeMessage"]
     assert len(subscribe_frames) == 1
     assert subscribe_frames[0]["msg"]["name"] == "candle-generated"
-    assert subscribe_frames[0]["msg"]["params"]["active_id"] == _ACTIVE_ID
+    # `active_id`/`size` MUST be nested inside a `routingFilters` object
+    # inside `params` (confirmed via a real browser capture, see
+    # docs/spike-report.md's "CRITICAL — corrected 2026-08-08" entry) --
+    # flat `params: {active_id, size}` is silently ignored by the server
+    # (no error, just zero matching `candle-generated` pushes).
+    routing_filters = subscribe_frames[0]["msg"]["params"]["routingFilters"]
+    assert routing_filters["active_id"] == _ACTIVE_ID
+    assert routing_filters["size"] == _TIMEFRAME_S
 
 
 def test_stream_closed_candles_rejects_an_asset_it_was_not_configured_for() -> None:

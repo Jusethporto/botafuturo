@@ -101,6 +101,7 @@ session, just unique enough to disambiguate concurrently in-flight calls.
 | `option` | recv | `{"request_id":"195","name":"option","msg":{"user_id":...,"id":14147910497,"price":1000,"exp":1786214520,"created":1786214459,"type":"turbo","act":86,"direction":"call","exp_value":984275,"profit_income":187,"profit_return":0,...},"status":2000}` | order ack. `id` here is the option/order id — needed to correlate with the later settlement push |
 | `position-changed` (subscribed via `portfolio.position-changed`) | recv | see below, `status: "open"` while pending, `status: "closed"` at settlement | **this is the settlement event** — see full example below |
 | `candle-generated` (subscribed via `subscribeMessage::candle-generated`) | recv | `{"name":"candle-generated","microserviceName":"quotes","msg":{"active_id":86,"size":1,"at":<ns ts>,"from":<unix s>,"to":<unix s>,"id":<candle id>,"open":0.984425,"close":0.984425,"min":0.984425,"max":0.984425,"ask":0.98443,"bid":0.98442,"volume":0,"phase":"T"}}` | live price stream, very high frequency (~1 msg/sec at `size:1`, i.e. 1-second candles; 777 of these arrived during a ~5 minute session) |
+| `candle-generated` **subscribe request** (CRITICAL — corrected 2026-08-08 via a second capture, see below) | send | `{"name":"subscribeMessage","request_id":"<id>","msg":{"name":"candle-generated","params":{"routingFilters":{"active_id":86,"size":60}}}}` | **`active_id`/`size` MUST be nested inside a `routingFilters` object inside `params`**, not flat `params:{active_id,size}`. No `version` key was observed in the real client's `candle-generated` subscribe message (unlike some other subscriptions, e.g. `level-updated`, which do send `"version":"1.0"`). The first adapter implementation (PR10) sent flat, unwrapped params and silently received **zero** `candle-generated` pushes as a result — the server appears to ignore a malformed/unrecognized subscription without any error response. This was caught by the user's first real live run (bot connected fine, authenticated fine, but no candle data ever arrived) and confirmed by a follow-up capture comparing our subscribe call against the real browser's. |
 | `positions-state` (subscribed) | recv | `{"name":"positions-state","microserviceName":"portfolio","msg":{"positions":[{"id":"...","instrument_type":"turbo-option","sell_profit":448.8,"margin":1000,"current_price":0.984275,"pnl":-551.2,"pnl_net":-551.2,"open_price":0.984275,"expected_profit":1000,...}],"subscription_id":"...","user_id":...,"expires_in":59}}` | periodic live mark-to-market of the still-open position (not the final settlement) |
 | `get-candles` (send) / `candles` (recv) | both | not deep-inspected this round | historical candle fetch — needed for strategy warm-up, worth a follow-up capture focused on this call's exact params |
 
@@ -205,9 +206,19 @@ winning trade.
 
 ## Open items for a follow-up capture (not blocking, but worth noting)
 
-- `active_id` ↔ instrument-symbol mapping (e.g. which `active_id` is
-  "EURUSD-OTC" vs the `86` observed here) — needs one more capture
-  focused on the asset-list/initialization call.
+- ~~`active_id` ↔ instrument-symbol mapping~~ **RESOLVED** (2026-08-08,
+  second capture): the `initialization-data` message (`msg.turbo.actives`)
+  and `underlying-list`/`underlying-list-changed` messages carry the full
+  mapping. Confirmed examples: `active_id=86` → `AUDCAD-OTC` (this is the
+  asset actually traded during the original spike, not EURUSD as
+  initially assumed when re-testing), `active_id=76` → `EURUSD-OTC`,
+  `active_id=1` → `EURUSD` (non-OTC, forex-hours-only), `active_id=7` →
+  `AUDCAD` (non-OTC). A full lookup table was NOT transcribed here (the
+  `initialization-data` payload is large and asset lists change over
+  time) — implementing a small `sendMessage::get-initialization-data` or
+  `digital-option-instruments.get-underlying-list` call in the adapter to
+  fetch this table live is the recommended follow-up over hardcoding a
+  snapshot.
 - Exact balance amount scaling (x100 assumption above is very likely
   correct for a Quadcode-family platform but should be double-checked
   against the UI's displayed number before the adapter trusts it).

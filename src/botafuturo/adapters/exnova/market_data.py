@@ -166,10 +166,31 @@ class ExnovaMarketDataAdapter:
             # stream and is silently ignored -- see docs/spike-report.md.
 
     def _subscribe_candles(self, timeframe_s: int) -> None:
+        # `active_id`/`size` MUST be nested inside a `routingFilters` object
+        # inside `params`, confirmed via a real browser capture (see
+        # docs/spike-report.md's "CRITICAL -- corrected 2026-08-08" entry).
+        # A flat `params={"active_id": ..., "size": ...}` is silently
+        # ignored by the server: no error is returned, the subscription
+        # request itself succeeds, but zero matching `candle-generated`
+        # pushes ever arrive. This was caught by a real live run (bot
+        # connected + authenticated fine, but no candle data for 4+
+        # minutes despite healthy `timeSync` heartbeats) and confirmed by a
+        # follow-up capture comparing our subscribe call against the real
+        # client's.
+        #
+        # Note: the real client's `candle-generated` subscribe message has
+        # no `version` key at the `msg` level (unlike e.g. `level-updated`,
+        # which does send `"version":"1.0"`). `ExnovaWsClient.subscribe()`
+        # always adds `version` unconditionally for every event -- whether
+        # an extra, unused `version` key breaks this specific subscription
+        # is unconfirmed, so we deliberately leave `subscribe()`'s generic
+        # envelope unchanged rather than adding a special case for one
+        # event: the `routingFilters` wrapper below is the confirmed,
+        # load-bearing fix.
         self._ws.subscribe(
             _CANDLE_EVENT,
             _CANDLE_STREAM_REQUEST_ID,
-            params={"active_id": self._active_id, "size": timeframe_s},
+            params={"routingFilters": {"active_id": self._active_id, "size": timeframe_s}},
         )
 
     def _reconnect(self, attempt: int) -> None:
