@@ -3,7 +3,7 @@
 Honors the same contract real `BrokerPort` adapters must honor
 (`InsufficientBalance`, `UnsupportedExpiry`, idempotent `settle`) -- see
 `tests/contract/test_broker_port_contract.py`, which runs against this fake
-today and will run against `PaperBrokerAdapter` once it lands (a later PR).
+and against `botafuturo.adapters.paper.broker.PaperBrokerAdapter`.
 """
 from __future__ import annotations
 

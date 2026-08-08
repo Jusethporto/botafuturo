@@ -1,10 +1,10 @@
 """Conformance tests for `BrokerPort` implementations.
 
-Parametrized over every known implementation of `BrokerPort`. Today that is
-only `FakeBroker`; `PaperBrokerAdapter` (a later PR) joins this same list
-once it exists, so this same suite proves both conform to the port's
-documented contract (`InsufficientBalance`, `UnsupportedExpiry`, and
-idempotent `settle`).
+Parametrized over every known implementation of `BrokerPort`: `FakeBroker`
+(the test fake) and `PaperBrokerAdapter` (the production paper-trading
+adapter). This same suite proves both conform to the port's documented
+contract (`InsufficientBalance`, `UnsupportedExpiry`, and idempotent
+`settle`).
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 
+from botafuturo.adapters.paper.broker import PaperBrokerAdapter
 from botafuturo.domain.models import Direction, OrderRequest, Quote
 from botafuturo.ports.broker import BrokerPort, InsufficientBalance, UnsupportedExpiry
 from tests.fakes.broker import FakeBroker
@@ -32,11 +33,18 @@ def _order(stake: Decimal = Decimal("10"), expiry_s: int = 60) -> OrderRequest:
     )
 
 
-def _make_broker() -> FakeBroker:
+def _make_fake_broker() -> FakeBroker:
     return FakeBroker(starting_balance=Decimal("1000"))
 
 
-BROKER_FACTORIES = [pytest.param(_make_broker, id="FakeBroker")]
+def _make_paper_broker_adapter() -> PaperBrokerAdapter:
+    return PaperBrokerAdapter(starting_balance=Decimal("1000"))
+
+
+BROKER_FACTORIES = [
+    pytest.param(_make_fake_broker, id="FakeBroker"),
+    pytest.param(_make_paper_broker_adapter, id="PaperBrokerAdapter"),
+]
 
 
 @pytest.mark.contract
