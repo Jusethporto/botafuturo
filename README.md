@@ -134,20 +134,45 @@ python -m botafuturo.cli.main report --journal-dir <dir> --date <YYYY-MM-DD>
 wins/losses/ties, win rate, net P&L).
 
 ```bash
-python -m botafuturo.cli.main run --asset <SYMBOL> [--timeframe-s 60] [--journal-dir <dir>] --fake-data
+python -m botafuturo.cli.main run --asset <SYMBOL> --active-id <ID> [--timeframe-s 60] [--journal-dir <dir>]
 ```
 
-`run` is **not runnable end-to-end outside of tests yet**: there is no
-production `MarketDataPort` implementation wired into it (that is the
-deferred Exnova adapter, Phase 8). Invoking it without `--fake-data` refuses
-to run and explains why; even with `--fake-data` it currently exits with an
-explanatory message rather than trading, since wiring a test-only fake
-(`tests/fakes/market_data.py`) into the production entrypoint would blur the
-test/production boundary. The composition root
-(`botafuturo.cli.wire.build_paper_trading_session`) and the session loop
-(`botafuturo.cli.run.run_session`) that `run` would ultimately drive are
-already fully implemented and exercised end-to-end by
-`tests/e2e/test_offline_session.py` — only the live data feed is missing.
+`run` connects to **real, live Exnova market data** and drives a genuine
+paper-trading session against it: candles stream from the real
+`ExnovaMarketDataAdapter` (`src/botafuturo/adapters/exnova/market_data.py`),
+credentials come from `Settings` (`EXNOVA_EMAIL`/`EXNOVA_PASSWORD` in your
+`.env`), and `--active-id` is the numeric Exnova instrument id to subscribe
+to. **Order execution stays 100% simulated** via `PaperBrokerAdapter` — no
+real-money order is ever placed; see [Scope (v1)](#scope-v1--read-this-first)
+and [Safety guarantees](#safety-guarantees).
+
+`--active-id` is required because there is no symbol↔`active_id` lookup
+table yet (see `docs/spike-report.md`'s "Open items"): find the numeric id
+for your asset by observing a network capture of the Exnova web app's
+WebSocket traffic (the `candle-generated`/`subscribeMessage` payloads carry
+it), the same way the id was obtained during the validation spike.
+
+`history()`/`price_at()` are **not implemented** on the real adapter yet (the
+`get-candles` request/response shape was not captured with enough confidence
+during the spike — see `docs/spike-report.md`), so the strategy has no
+historical warm-start; it only reacts to live candles received after
+connecting. On a feed gap or dropped connection, the adapter automatically
+reconnects (exponential backoff with full jitter) and the strategy's
+rolling-window state is reset.
+
+```bash
+python -m botafuturo.cli.main run --asset EURUSD --active-id 86 --fake-data
+```
+
+`--fake-data` remains a deliberate **non-functional** acknowledgement (kept
+from the original v1 design): there is still no production
+`FakeMarketData`-equivalent wired for real interactive use (`tests/fakes` is
+test-only code and is never imported by `src/botafuturo`), so passing this
+flag prints a limitation message and exits without trading — it exists only
+so a caller can't accidentally believe fake data is being traded for real.
+The composition root (`botafuturo.cli.wire.build_paper_trading_session`) and
+the session loop (`botafuturo.cli.run.run_session`) are also fully exercised
+offline by `tests/e2e/test_offline_session.py`.
 
 ## Project layout
 
