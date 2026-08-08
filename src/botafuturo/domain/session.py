@@ -7,6 +7,11 @@ this module's public shape:
 
 - `open_position(request: OrderRequest) -> OrderAck` -- broker-like fill.
 - `get_balance() -> Decimal` -- current account balance.
+- `settle_position(ack: OrderAck, expiry_quote: Quote) -> Trade` --
+  broker-like settlement. `TradingSession` delegates outcome/pnl/balance
+  computation entirely to this collaborator (it does not recompute them
+  itself) so the broker's real ledger -- not a locally-recomputed
+  duplicate -- is always the single source of truth for a `Trade`.
 - `log_trade(trade: Trade) -> None` -- trade-log-like sink.
 
 `TradingSession` is scoped to a single instrument (`asset`) and enforces
@@ -18,10 +23,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable, Optional
 
-from botafuturo.domain.models import Candle, OrderAck, OrderRequest, Signal, Trade
-from botafuturo.domain.pnl import pnl_for
+from botafuturo.domain.models import Candle, OrderAck, OrderRequest, Quote, Signal, Trade
 from botafuturo.domain.risk.manager import RiskManager
-from botafuturo.domain.settlement import resolve_outcome
 from botafuturo.domain.strategy.base import Strategy
 
 
@@ -37,6 +40,7 @@ class TradingSession:
     payout_rate: Decimal
     open_position: Callable[[OrderRequest], OrderAck]
     get_balance: Callable[[], Decimal]
+    settle_position: Callable[[OrderAck, Quote], Trade]
     log_trade: Callable[[Trade], None]
 
     _open: Optional[OrderAck] = field(default=None, init=False, repr=False)
@@ -67,18 +71,9 @@ class TradingSession:
         if candle.open_time < self._open.expiry_at:
             return
 
-        request = self._open.request
-        outcome = resolve_outcome(request.direction, self._open.entry_price, candle.close)
-        pnl = pnl_for(outcome, request.stake, request.payout_rate)
-        balance_after = self.get_balance() + pnl
+        expiry_quote = Quote(asset=candle.asset, ts=candle.open_time, price=candle.close)
+        trade = self.settle_position(self._open, expiry_quote)
 
-        trade = Trade(
-            ack=self._open,
-            expiry_price=candle.close,
-            outcome=outcome,
-            pnl=pnl,
-            balance_after=balance_after,
-        )
         self.risk_manager.record(trade)
         self.log_trade(trade)
         self._open = None

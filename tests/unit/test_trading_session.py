@@ -19,11 +19,14 @@ from botafuturo.domain.models import (
     Direction,
     OrderAck,
     OrderRequest,
+    Quote,
     Signal,
     Trade,
 )
+from botafuturo.domain.pnl import pnl_for
 from botafuturo.domain.risk.manager import RiskManager
 from botafuturo.domain.session import TradingSession
+from botafuturo.domain.settlement import resolve_outcome
 
 _START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -64,11 +67,19 @@ class _ScriptedStrategy:
 
 
 class _FakeBroker:
-    """Records every fill request and returns a deterministic ack."""
+    """Records every fill request and returns a deterministic ack.
 
-    def __init__(self) -> None:
+    `settle_position` mirrors the real `BrokerPort.settle` contract
+    (resolve outcome + pnl from the injected `get_balance` callable) so
+    these behavioral tests keep exercising `TradingSession` against a
+    broker-shaped `settle_position` collaborator, exactly like the real
+    wiring in `cli/wire.py`.
+    """
+
+    def __init__(self, get_balance: Any) -> None:
         self.requests: List[OrderRequest] = []
         self._next_id = 1
+        self._get_balance = get_balance
 
     def open_position(self, request: OrderRequest) -> OrderAck:
         self.requests.append(request)
@@ -80,6 +91,17 @@ class _FakeBroker:
         )
         self._next_id += 1
         return ack
+
+    def settle_position(self, ack: OrderAck, quote: Quote) -> Trade:
+        outcome = resolve_outcome(ack.request.direction, ack.entry_price, quote.price)
+        pnl = pnl_for(outcome, ack.request.stake, ack.request.payout_rate)
+        return Trade(
+            ack=ack,
+            expiry_price=quote.price,
+            outcome=outcome,
+            pnl=pnl,
+            balance_after=self._get_balance() + pnl,
+        )
 
 
 class _FakeTradeLog:
@@ -101,7 +123,7 @@ def _build_session(
     expiry_s: int = 60,
 ):
     strategy = _ScriptedStrategy(script)
-    broker = _FakeBroker()
+    broker = _FakeBroker(get_balance=lambda: Decimal(balance))
     trade_log = _FakeTradeLog()
     manager = risk_manager or RiskManager(day_start_balance=Decimal(balance))
     session = TradingSession(
@@ -113,6 +135,7 @@ def _build_session(
         payout_rate=Decimal("0.85"),
         open_position=broker.open_position,
         get_balance=lambda: Decimal(balance),
+        settle_position=broker.settle_position,
         log_trade=trade_log.log_trade,
     )
     return session, strategy, broker, trade_log, manager

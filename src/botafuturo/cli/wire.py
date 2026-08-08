@@ -122,6 +122,7 @@ def build_paper_trading_session(
         payout_rate=settings.payout_rate,
         open_position=broker.place,
         get_balance=broker.balance,
+        settle_position=broker.settle,
         log_trade=log_trade,
     )
 

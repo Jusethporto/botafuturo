@@ -64,6 +64,11 @@ def _build_session():
             "no signal expected: candle closes are flat, so no crossover fires"
         )
 
+    def _settle_position(ack, quote):
+        raise AssertionError(
+            "no position expected to settle: no signal is ever emitted"
+        )
+
     session = TradingSession(
         asset=_ASSET,
         strategy=strategy,
@@ -73,6 +78,7 @@ def _build_session():
         payout_rate=Decimal("0.85"),
         open_position=_open_position,
         get_balance=lambda: Decimal("1000"),
+        settle_position=_settle_position,
         log_trade=logged.append,
     )
     return session, strategy
