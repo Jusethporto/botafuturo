@@ -125,19 +125,20 @@ def test_credentials_never_leak_through_logs_journal_or_stdout(
     assert processed == len(_CLOSES)
 
     # --- Adversarial probes: prove the chokepoint actively redacts. ---
-    # NOTE: the format TEMPLATE deliberately avoids a literal "password="
-    # (or similar secret-shaped keyword) prefix directly before a `%s`
-    # placeholder. `RedactingFilter.filter()` runs `redact_text` (which
-    # includes the `password=`/`token=`/... key-value regex) against the
-    # raw, UN-substituted `record.msg` template, so a template shaped like
-    # `"password=%s"` gets its OWN placeholder text matched and rewritten
-    # to `"password=***REDACTED***"` before %-substitution ever happens,
+    # NOTE: an earlier version of `RedactingFilter.filter()` ran
+    # `redact_text` against the raw, UN-substituted `record.msg` template
+    # (independently from `record.args`), so a template shaped like
+    # `"password=%s"` had its OWN placeholder text matched and rewritten to
+    # `"password=***REDACTED***"` before %-substitution ever happened,
     # leaving stray extra `%`-args and raising `TypeError: not all
     # arguments converted during string formatting` inside `emit()`
-    # (silently swallowed by `logging`'s own error handling) -- see this
-    # test's module docstring "Issues Found" note in the PR that added it.
-    # This test targets registered-secret-VALUE redaction specifically, so
-    # it avoids that unrelated pre-existing template/regex interaction.
+    # (silently swallowed by `logging`'s own error handling). That bug is
+    # now fixed -- `filter()` redacts `record.getMessage()` (the FINAL,
+    # fully-substituted message) instead -- and is covered by a dedicated
+    # regression test in `tests/unit/test_redaction.py`. This test still
+    # avoids a `password=%s`-shaped template because it targets
+    # registered-secret-VALUE redaction specifically, not that key=value
+    # regex interaction.
     logging.getLogger(__name__).warning(
         "login attempt credentials: %s / %s", _SENTINEL_EMAIL, _SENTINEL_PASSWORD
     )

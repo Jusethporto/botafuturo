@@ -140,3 +140,46 @@ def test_redacting_filter_redacts_through_real_logger(caplog) -> None:
         assert _REDACTED in caplog.text
     finally:
         logger.filters.clear()
+
+
+def test_redacting_filter_handles_percent_style_call_with_secret_shaped_template(
+    caplog,
+) -> None:
+    """Regression test: `logger.warning("password=%s", secret)` is an
+    entirely idiomatic %-style logging call whose format TEMPLATE itself
+    contains a secret-shaped `password=` key, followed by the literal `%s`
+    placeholder.
+
+    A `RedactingFilter` that redacts `record.msg` (the RAW, un-substituted
+    template) independently from `record.args` will have `_SECRET_KV` match
+    `password=%s` in the template itself (since `%s` satisfies `\\S+`) and
+    rewrite it to `password=***REDACTED***` -- destroying the placeholder
+    while `record.args` still holds one argument. Python's logging then
+    tries `record.msg % record.args` inside `Handler.emit()`, raises
+    `TypeError: not all arguments converted during string formatting`, and
+    the record is silently never written (stdlib default error handling
+    just prints to stderr) -- or, under pytest's `caplog`, propagates as an
+    uncaught exception because `LogCaptureHandler.handleError` re-raises.
+
+    The fix redacts the FINAL, fully-substituted message
+    (`record.getMessage()`) instead, so the placeholder is already resolved
+    before redaction ever runs.
+    """
+    secret = "hunter2-secret"
+    registry = SecretRegistry()
+    logger = logging.getLogger("botafuturo.test.redaction.percent_style")
+    logger.addFilter(RedactingFilter(registry))
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="botafuturo.test.redaction.percent_style"
+        ):
+            logger.warning("password=%s", secret)
+
+        assert len(caplog.records) == 1, (
+            "the log record must actually be emitted, not silently dropped "
+            "by a TypeError inside Handler.emit()"
+        )
+        assert secret not in caplog.text
+        assert _REDACTED in caplog.text
+    finally:
+        logger.filters.clear()

@@ -109,20 +109,23 @@ class RedactingFilter(logging.Filter):
         self._registry = registry
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = redact_text(record.msg, self._registry)
-
-        if record.args:
-            if isinstance(record.args, Mapping):
-                record.args = {
-                    key: redact_text(value, self._registry)
-                    if isinstance(value, str)
-                    else value
-                    for key, value in record.args.items()
-                }
-            else:
-                record.args = tuple(
-                    redact_text(arg, self._registry) if isinstance(arg, str) else arg
-                    for arg in record.args
-                )
+        # Redact the FINAL, fully-substituted message (`record.getMessage()`
+        # safely does `record.msg % record.args` using the ORIGINAL,
+        # not-yet-redacted values) instead of redacting `record.msg` and
+        # `record.args` independently. Redacting the raw, un-substituted
+        # template on its own is unsafe: a template shaped like
+        # `"password=%s"` has its OWN `%s` placeholder matched by the
+        # secret-shaped key=value regex (`%s` satisfies `\S+`) and gets
+        # rewritten to `"password=***REDACTED***"`, destroying the
+        # placeholder while `record.args` still holds an argument -- so
+        # stdlib's `record.msg % record.args` later raises
+        # `TypeError: not all arguments converted during string formatting`
+        # inside `Handler.emit()`, silently dropping the record.
+        message = record.getMessage()
+        record.msg = redact_text(message, self._registry)
+        # The message is now fully substituted and already redacted; clear
+        # `args` (not `()` -- `None` is the conventional "no args" sentinel,
+        # and `record.getMessage()` treats both as falsy) so nothing
+        # downstream re-attempts `%`-substitution into the redacted string.
+        record.args = None
         return True
