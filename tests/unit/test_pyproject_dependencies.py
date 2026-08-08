@@ -52,3 +52,14 @@ def test_declares_pytest_and_pytest_asyncio_dev_dependencies() -> None:
         dep.startswith("pytest") and not dep.startswith("pytest-asyncio")
         for dep in dev_deps
     )
+
+
+def test_declares_httpx_and_websockets_as_exnova_optional_dependencies() -> None:
+    """Phase 8 (the real Exnova market-data adapter): `session_auth.py`
+    needs an HTTP client for the login call, `ws_client.py` needs a
+    WebSocket client for the live candle stream."""
+    data = _load_pyproject()
+    optional = data["project"]["optional-dependencies"]
+    exnova_deps = [dep.lower() for dep in optional.get("exnova", [])]
+    assert any(dep.startswith("httpx") for dep in exnova_deps)
+    assert any(dep.startswith("websockets") for dep in exnova_deps)

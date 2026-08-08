@@ -21,6 +21,8 @@ dev = [
 ]
 exnova = [
     "keyring>=24.0,<26.0",
+    "httpx>=0.27,<1.0",
+    "websockets>=12.0,<18.0",
 ]
 
 [tool.setuptools.packages.find]

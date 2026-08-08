@@ -1,9 +1,24 @@
 """Conformance tests for `MarketDataPort` implementations.
 
-Parametrized over every known implementation of `MarketDataPort`. Today
-that is only `FakeMarketData`; `ExnovaMarketDataAdapter` (a later PR) joins
-this same list once it exists, so this same suite proves both conform to
-the port's documented contract.
+Parametrized over every known FULLY-CONFORMING implementation of
+`MarketDataPort`. Today that is only `FakeMarketData`.
+
+`ExnovaMarketDataAdapter` (PR10 / Phase 8) deliberately does NOT join
+`MARKET_DATA_FACTORIES`: its `history()`/`price_at()` intentionally raise
+`NotImplementedError` in v1 (see `adapters/exnova/market_data.py`'s module
+docstring -- the `get-candles` schema needed for `history()` was not
+captured with enough confidence during the validation spike). This
+suite's `history`/`price_at` tests assert real, successful behavior for
+every factory in the list, so adding a factory whose `history`/`price_at`
+always raise would either force those shared tests to special-case it
+(weakening `FakeMarketData`'s own coverage) or fail outright -- neither is
+acceptable. `ExnovaMarketDataAdapter`'s narrower, real coverage instead
+lives in `tests/integration/test_exnova_market_data_adapter.py`
+(`stream_closed_candles`/`connect`/`disconnect`, against a fake WS
+transport) plus its explicit `NotImplementedError` assertions for
+`history`/`price_at`. `test_conforms_to_protocol_shape`-style structural
+checks are satisfied there too; this file's parametrized suite is reserved
+for implementations that honor the FULL contract.
 """
 from __future__ import annotations
 
