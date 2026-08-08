@@ -31,6 +31,25 @@ see `ws_client.WsConnectionLost`), this adapter yields one `GapMarker` for
 the interrupted timeframe slot, waits `reconnect.backoff_delay(attempt)`
 (exponential backoff with full jitter, capped at 60s), performs a full
 fresh login + WS re-authenticate, re-subscribes, and resumes streaming.
+
+Closed-bar detection (window-rollover buffering): a real live run
+confirmed the server pushes `candle-generated` roughly once per SECOND
+regardless of the subscribed `size` -- e.g. at `size:60` it repeats the
+SAME `from`/`to` window (with `close`/`min`/`max` evolving) about 60
+times before the window's real 60 seconds elapse and it moves to the next
+one (see `docs/spike-report.md`). `to_candle()` stays a pure per-message
+mapper and does NOT know whether a given push is the final state of its
+window -- so `stream_closed_candles()` is responsible for closed-bar
+detection: it keeps a single "in-progress candle" buffer (the latest
+mapped `Candle` for the currently-open window) and only YIELDS a candle
+once it observes a push for a NEW (different) `open_time`, at which point
+it yields the previously buffered candle (that window's final, closed
+state) and starts buffering the new one. A still-forming candle is never
+yielded on its own -- not while pushes for it keep arriving, and not on
+generator exhaustion (`disconnect()`) either, since it genuinely never
+closed. The buffer is also discarded (not carried across) on every
+reconnect, since the resumed stream may have missed that window's actual
+close.
 """
 from __future__ import annotations
 
@@ -138,12 +157,22 @@ class ExnovaMarketDataAdapter:
         self.connect()
         self._subscribe_candles(timeframe_s)
         attempt = 0
+        # The latest mapped `Candle` for the currently still-forming
+        # window, or `None` if no push has been seen yet (fresh stream, or
+        # just after a reconnect). See this module's docstring on
+        # closed-bar detection -- never yielded until a push for a NEW
+        # `open_time` is observed, proving this one has actually closed.
+        pending_candle: Optional[Candle] = None
 
         while True:
             try:
                 msg = self._ws.receive()
             except WsConnectionLost:
                 attempt += 1
+                # Discard rather than carry across: the resumed stream may
+                # have missed this window's actual close, so whatever was
+                # buffered must never be yielded as though it had closed.
+                pending_candle = None
                 yield GapMarker(
                     asset=asset,
                     timeframe_s=timeframe_s,
@@ -159,7 +188,23 @@ class ExnovaMarketDataAdapter:
                 body = msg.get("msg") or {}
                 if body.get("active_id") == self._active_id:
                     attempt = 0
-                    yield mapping.to_candle(msg, asset)
+                    candle = mapping.to_candle(msg, asset)
+                    if pending_candle is not None and candle.open_time != pending_candle.open_time:
+                        # The window rolled over: `pending_candle` just
+                        # closed (its final buffered state is this push's
+                        # predecessor) -- yield it, then start buffering
+                        # the new, now-current window. The new push itself
+                        # is NOT yielded yet: it only becomes eligible once
+                        # the window AFTER it closes, in turn.
+                        closed_candle = pending_candle
+                        pending_candle = candle
+                        yield closed_candle
+                    else:
+                        # Either the first push ever seen, or another live
+                        # update to the SAME still-forming window -- just
+                        # replace the buffer with this newer state, don't
+                        # yield yet.
+                        pending_candle = candle
             elif name == _TIME_SYNC_EVENT:
                 attempt = 0
             # Any other push (e.g. `front`) is informational for this

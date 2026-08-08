@@ -42,6 +42,41 @@ def _load_candle_pushes() -> List[Mapping[str, Any]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
+def _candle_push(
+    *, from_ts: int, size: int = _TIMEFRAME_S, close: float, active_id: int = _ACTIVE_ID
+) -> Mapping[str, Any]:
+    """Build one synthetic `candle-generated` push for a given window
+    (`from_ts`/`size`) and `close` value -- mirrors the REAL server
+    behavior confirmed against a live run: the server pushes roughly once
+    per second regardless of `size`, repeating the SAME `from`/`to` window
+    (with `close`/`min`/`max` evolving) until that window's real duration
+    elapses, then starts a new window. Tests build sequences of these to
+    simulate multiple live-update pushes for the same still-forming bar
+    followed by a rollover to the next one (see
+    `test_exnova_market_data_adapter.py`'s module docstring and
+    `docs/spike-report.md`)."""
+    return {
+        "name": "candle-generated",
+        "microserviceName": "quotes",
+        "msg": {
+            "active_id": active_id,
+            "size": size,
+            "at": from_ts * 1_000_000_000,
+            "from": from_ts,
+            "to": from_ts + size,
+            "id": from_ts,
+            "open": close,
+            "close": close,
+            "min": close,
+            "max": close,
+            "ask": close,
+            "bid": close,
+            "volume": 1,
+            "phase": "T",
+        },
+    }
+
+
 class FakeTransport:
     def __init__(self, incoming: Optional[List[Mapping[str, Any]]] = None) -> None:
         self.sent: List[Mapping[str, Any]] = []
@@ -157,6 +192,17 @@ def test_price_at_raises_not_implemented() -> None:
 
 
 def test_stream_closed_candles_yields_mapped_candles_in_order() -> None:
+    # `candle_generated.jsonl`'s 3 fixture pushes each carry a DIFFERENT
+    # `from` (T0, T0+1, T0+2 -- genuinely separate closed 1-second windows,
+    # since `size:1` is the one case where push-cadence-happens-to-equal-
+    # bar-duration per docs/spike-report.md). Feeding all 3 therefore rolls
+    # over TWICE: the 1st push opens+buffers window T0 (no yield yet), the
+    # 2nd push's *different* `from` closes T0 (yielded) and opens T1, and
+    # the 3rd push's *different* `from` closes T1 (yielded) and opens T2 --
+    # T2 itself stays buffered (never yielded) since no 4th push closes it.
+    # So 3 pushes correctly yield only 2 candles, not 3 -- see this
+    # module's regression test below for the general (same-window, evolving
+    # `close`) case that most directly demonstrates the bugfix.
     pushes = _load_candle_pushes()
     incoming = [
         _load_json("authenticated.json"),
@@ -170,11 +216,51 @@ def test_stream_closed_candles_yields_mapped_candles_in_order() -> None:
     adapter = _make_adapter([transport])
 
     stream = adapter.stream_closed_candles(_ASSET, _TIMEFRAME_S)
-    candles = [next(stream) for _ in range(3)]
+    candles = [next(stream) for _ in range(2)]
 
     assert all(isinstance(c, Candle) for c in candles)
-    assert [c.asset for c in candles] == [_ASSET] * 3
-    assert [str(c.close) for c in candles] == ["0.98442", "0.98445", "0.98441"]
+    assert [c.asset for c in candles] == [_ASSET] * 2
+    assert [str(c.close) for c in candles] == ["0.98442", "0.98445"]
+
+
+def test_stream_closed_candles_only_yields_a_candle_once_its_window_rolls_over() -> None:
+    """Core regression test for the premature-warm-up bug: the real Exnova
+    server pushes ~once/second for the STILL-FORMING bar of the subscribed
+    `size`, repeating the same `from`/`to` window with an evolving `close`
+    until it genuinely closes (see docs/spike-report.md and this module's
+    docstring). `stream_closed_candles()` must only yield once a window
+    rollover (a NEW `from`) is observed, and must yield the FINAL buffered
+    state of the window that just closed -- not every intermediate push."""
+    t0, t1, t2 = 1780000000, 1780000060, 1780000120
+    pushes = [
+        _candle_push(from_ts=t0, size=60, close=0.98440),
+        _candle_push(from_ts=t0, size=60, close=0.98443),
+        _candle_push(from_ts=t0, size=60, close=0.98444),  # final T0 state
+        _candle_push(from_ts=t1, size=60, close=0.98446),
+        _candle_push(from_ts=t1, size=60, close=0.98448),  # final T1 state
+        _candle_push(from_ts=t2, size=60, close=0.98450),  # T2 never closes here
+    ]
+    incoming = [_load_json("authenticated.json"), *pushes]
+    transport = FakeTransport(incoming=incoming)
+    adapter = _make_adapter([transport])
+
+    stream = adapter.stream_closed_candles(_ASSET, 60)
+    first = next(stream)
+    second = next(stream)
+
+    assert isinstance(first, Candle)
+    assert isinstance(second, Candle)
+    assert str(first.close) == "0.98444"
+    assert first.open_time.timestamp() == t0
+    assert str(second.close) == "0.98448"
+    assert second.open_time.timestamp() == t1
+    # Exactly 2 candles yielded from 6 pushes -- NOT 6. The T2 push is
+    # still buffered (its window never rolled over in this test), so the
+    # next event out of the generator is the queue-exhaustion GapMarker,
+    # never a T2 candle -- the still-forming T2 candle is correctly never
+    # yielded (see this module's docstring on graceful exhaustion).
+    third = next(stream)
+    assert isinstance(third, GapMarker)
 
 
 def test_stream_closed_candles_subscribes_for_the_configured_active_id() -> None:
@@ -207,30 +293,39 @@ def test_stream_closed_candles_rejects_an_asset_it_was_not_configured_for() -> N
 
 
 def test_a_simulated_connection_drop_yields_a_gap_marker_and_reconnects() -> None:
-    pushes = _load_candle_pushes()
-    # First transport: authenticate, then ONE candle, then the queue runs
+    t0, t5, t6 = 1780000000, 1780000300, 1780000360
+    # First transport: authenticate, then ONE still-forming candle push for
+    # window T0 (no rollover ever observed for it) -- then the queue runs
     # dry -> `recv()` raises TimeoutError, simulating a dead connection
-    # (the timeSync-absence signal).
-    transport_1 = FakeTransport(incoming=[_load_json("authenticated.json"), pushes[0]])
+    # (the timeSync-absence signal). Because T0 never rolled over, it must
+    # stay buffered-and-discarded, NEVER yielded.
+    transport_1 = FakeTransport(
+        incoming=[_load_json("authenticated.json"), _candle_push(from_ts=t0, close=0.98440)]
+    )
     # Second transport: the adapter reconnects onto this one (fresh login +
-    # WS auth), then more candles arrive normally.
-    transport_2 = FakeTransport(incoming=[_load_json("authenticated.json"), pushes[1]])
+    # WS auth). A fresh T5 push arrives, then a T6 push rolls the window
+    # over, closing T5 -- proving the resumed stream tracks ITS OWN windows
+    # from scratch, never leaking the stale pre-reconnect T0 buffer.
+    transport_2 = FakeTransport(
+        incoming=[
+            _load_json("authenticated.json"),
+            _candle_push(from_ts=t5, close=0.98446),
+            _candle_push(from_ts=t6, close=0.98450),
+        ]
+    )
 
     adapter = _make_adapter([transport_1, transport_2])
     stream = adapter.stream_closed_candles(_ASSET, _TIMEFRAME_S)
 
-    first = next(stream)
-    assert isinstance(first, Candle)
-    assert str(first.close) == "0.98442"
+    first = next(stream)  # transport_1's lone T0 push never closes -> reconnect
+    assert isinstance(first, GapMarker)
+    assert first.asset == _ASSET
+    assert first.timeframe_s == _TIMEFRAME_S
 
-    second = next(stream)  # transport_1 is now exhausted -> reconnect
-    assert isinstance(second, GapMarker)
-    assert second.asset == _ASSET
-    assert second.timeframe_s == _TIMEFRAME_S
-
-    third = next(stream)  # resumed on transport_2
-    assert isinstance(third, Candle)
-    assert str(third.close) == "0.98445"
+    second = next(stream)  # resumed on transport_2, T5 closes once T6 arrives
+    assert isinstance(second, Candle)
+    assert str(second.close) == "0.98446"
+    assert second.open_time.timestamp() == t5
 
     # Reconnect actually happened: transport_1 was closed and transport_2
     # received its own authenticate + re-subscribe frames.
@@ -238,6 +333,37 @@ def test_a_simulated_connection_drop_yields_a_gap_marker_and_reconnects() -> Non
     assert transport_2.sent[0]["name"] == "authenticate"
     subscribe_frames = [f for f in transport_2.sent if f["name"] == "subscribeMessage"]
     assert len(subscribe_frames) == 1
+
+
+def test_reconnect_discards_the_stale_pre_disconnect_buffered_candle() -> None:
+    """The in-progress-candle buffer must NOT survive a reconnect: the
+    resumed stream may have missed the actual close of whatever was
+    buffered, so it must never be yielded, merged with, or otherwise
+    influence post-reconnect candles."""
+    t0, t5, t6 = 1780000000, 1780000300, 1780000360
+    transport_1 = FakeTransport(
+        incoming=[_load_json("authenticated.json"), _candle_push(from_ts=t0, close=0.98440)]
+    )
+    transport_2 = FakeTransport(
+        incoming=[
+            _load_json("authenticated.json"),
+            _candle_push(from_ts=t5, close=0.98446),
+            _candle_push(from_ts=t6, close=0.98450),
+        ]
+    )
+    adapter = _make_adapter([transport_1, transport_2])
+    stream = adapter.stream_closed_candles(_ASSET, _TIMEFRAME_S)
+
+    seen = [next(stream), next(stream)]
+
+    candles_seen = [event for event in seen if isinstance(event, Candle)]
+    assert len(candles_seen) == 1
+    only_candle = candles_seen[0]
+    # Only the T5-window candle ever appears -- the stale pre-reconnect T0
+    # buffer (close=0.98440) is never yielded at any point.
+    assert str(only_candle.close) == "0.98446"
+    assert only_candle.open_time.timestamp() == t5
+    assert all(str(c.close) != "0.98440" for c in candles_seen)
 
 
 # NOTE on the "no live network" hard requirement: every test above

@@ -49,12 +49,24 @@ def to_candle(raw_msg: Mapping[str, Any], asset: str) -> Candle:
     received from `ws_client.py`, not just the inner body.
 
     A `candle-generated` push's `size` field is itself the candle's
-    duration in seconds (e.g. `1` for 1-second candles) and the observed
-    push cadence during the validation spike matched that duration exactly
-    (~1 msg/sec at `size:1`) -- so, for v1, every received push is treated
-    as already representing one CLOSED bar for that timeframe; there is no
-    separate "is this candle closed yet" flag in the observed payload to
-    check (see `docs/spike-report.md`).
+    duration in seconds (e.g. `1` for 1-second candles). The original
+    validation spike observed a push cadence of ~1 msg/sec and, since that
+    spike only tested `size:1`, wrongly generalized "push cadence matches
+    bar duration" to every `size` -- a REAL live run later confirmed the
+    server actually pushes ~once/sec for the CURRENTLY-FORMING bar of
+    whatever `size` was subscribed, repeating the same `from`/`to` window
+    (with `close`/`min`/`max` evolving) until that window's real duration
+    elapses. `size:1` was simply the one case where update-cadence happens
+    to equal bar-duration, making the distinction invisible (see
+    `docs/spike-report.md`).
+
+    This function stays a pure, stateless per-message mapper: it does NOT
+    attempt to detect whether the mapped candle's window has actually
+    closed -- there is no explicit "is this candle closed yet" flag in the
+    payload to check. Closed-bar detection (buffering pushes per window
+    and only surfacing a candle once a push for a NEW `from` is observed)
+    is `market_data.py::ExnovaMarketDataAdapter.stream_closed_candles()`'s
+    responsibility, not this function's -- see that module's docstring.
 
     Raises:
         MappingError: if `raw_msg` is not a `candle-generated` push, or is
